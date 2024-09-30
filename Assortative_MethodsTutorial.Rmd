@@ -1,0 +1,231 @@
+---
+title: "LaCombe_Rep"
+output: pdf_document
+date: "2024-09-26"
+---
+## Introduction
+
+This tutorial will walk through basic methodology of testing for assortative mixing on a network dataset.
+
+Two R packages are reviewed for this approach: Igraph and assortnet.
+Assortative Mixing can occur in two distinct ways. Homophily describes a network in which we see that similar nodes tend to be more connected throughout the network; "birds of a feather flock together." Heterophily describes node behavior in a network in which non-similar nodes tend to be more connected. This tutorial will provide examples of each and how to detect for both.
+
+Another consideration before running code is what exactly the "thing," or more technically the variable, that we want to test. Describing the variable is as simple as using basic statistical terms. We either have a categorical variable (race, gender, landtype, PartyID) that we can identify and measure for each node. Or we have a continuous, numeric values (income, time, height, years of residency). Newman (2003) discusses nominal variables as "discrete" variables, and continuous as "scalar," which matches the technical languages of matrix algebra. I spend time to discuss these differences because it is necessary to understand what attribute in your network you are trying to test, as the commands do depend on this attribute. 
+
+You will also want to consider whether your network is directed. For continuous/scalar attributes, the direction of the ties could matter in your network. This is easily handled by the packages, but do note the part of the code where you should enter if the network is directed. 
+
+Please select the "outline" button at the top right corner of this window to easily skip around in the file to the section that contains the materials appropriate for your assortative network analysis task.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#this is a for loop to install and load all the packages you will need. Reference the list to see what we use.
+#Packages
+P<-c("network", "assortnet", "readr", "haven", "usmap", "devtools", "ggplot2", "ggeasy")
+
+for (i in 1:length(P)) {
+  ifelse(!require(P[i],character.only=TRUE),install.packages(P[i]), #You may have to run this code chunk a few times before it turns green and prints the stars of succesfull loading.
+         print("✩")) #Stars will print if everything prints correctly.
+  library(P[i],character.only=TRUE)
+}
+rm(P)
+rm(i)
+```
+
+## Data
+Data for today's tutorial comes from three sources:
+1) The data replication materials from Bricker, C., & LaCombe, S. (2021). The Ties that Bind Us: The Influence of Perceived State Similarity on Policy Diffusion. Political Research Quarterly, 74(2), 377-387. https://doi.org/10.1177/1065912920906611. 
+
+The replication materials are from Dr. LaCombe's personal website, found here: https://www.scottlacombe.com/publications-and-working-papers.html
+
+  In Bricker and LaCombe's paper, the authors test whether non-geographic characteristics of the states impact policy diffusion. Similarity is measured via a survey of citizen perceptions of their own states. Using the respondent scores, Bricker and LaCombe construct "similarity ties" between the states to test the impact of perceived state similarities in the policy innovation and diffusion.   
+  
+2) Data from the Census Bureau which defines the "Divisions" and "Regions" of states. "Divisions" is more granular definition of the region each state is classified under, and includes 9 named levels. "Regions" is a more broad set of categories and includes only 4 named levels. The data came from here: https://github.com/cphalpert/census-regions/blob/master/us%20census%20bureau%20regions%20and%20divisions.csv
+
+3) Data on fatal accidents in each state from the fivethirtyeight github repository. This data includes a variable for the count of fatal accidents in each state in billions. The next columns describe the percentage of the count of accidents that were caused by a circumstance, such as speeding or drunk driving. Find the data here: https://github.com/fivethirtyeight/data/blob/master/bad-drivers/bad-drivers.csv
+
+Today, we will test similarity of the states by their geographic similarity within regions (Division and Region). We will also test if bad driving is similar across states. There may be geographic features, laws, or social attitudes within each state that may cause a similar volume of fatal car accidents. 
+
+```{r data}
+#load Bricker and LaCombe's state network data
+bl_data <- read_dta("dyadic_data.dta") 
+
+#bad driver data 
+driver <- read_csv("bad-drivers.csv")
+
+#drop DC - it is not included in the state network data
+driver <- driver[-c(9),] #from https://github.com/fivethirtyeight/data/blob/master/bad-drivers/bad-drivers.csv
+
+#Census data
+census <- read_csv("regions.csv") #from https://github.com/cphalpert/census-regions/blob/master/us%20census%20bureau%20regions%20and%20divisions.csv
+
+#drop DC
+census<- census[-c(8),] 
+
+#Mapping package is picky; the capitalized "State" variable has to be lower case:
+census$state <-census$State #attach lower case state variable to census data
+driver$state <-driver$State  #attach lower case state variable to driver data
+```
+## Map
+The argument of the paper is that measuring state similarity via citizen perceptions of their state is more complete than a geographic, contiguity measure. Here are the states visualized by a new geographic element, their Region, and subregion Division. Both variables come from the census data. 
+
+A map for the density of fatal accidents across the states might also visualize whether geography impacts fatal driving, or if states with similar fatality counts are the same in a different way.
+```{r map}
+par(mfrow=c(1,2))
+#A map of the states visualized by their Division identity
+plot_usmap("states", labels= TRUE, data = census, values = "Division") + #This line says to plot the map with "states" outlined, to label each state, to use "census" data, and that the value to fill the states on is their "Division" identity
+  scale_fill_brewer(blues9)   #the colors used to fill the states is from the ColorBrewer argument    
+
+#A map of the states visualized by their Region identity
+plot_usmap("states", labels= TRUE, data = census, values = "Region") + #This line says to plot the map with "states" outlined, to label each state, to use "census" data, and that the value to fill the states on is their "Region" identity
+  scale_fill_brewer(blues9)  #the colors used to fill the states is from the ColorBrewer argument  
+
+#The Denisty of the number of fatal car accidents in billions, by state
+plot_usmap("states", labels= TRUE, data = driver, values = "num_fatal") + #This line says to plot the map with "states" outlined, to label each state, to use "driver" data, and that the value to fill the states on is their "num_fatal" value
+  scale_fill_continuous(low = "white", high="#ce1b07", guide="none")  #the colors used to fill the states are from two chosen colors, which R will automatically scale to match continuous data. "num_fatal" is continuous, so the color argument is different from the discrete examples.  
+
+```
+
+## Network Object
+To test measures of assortative mixing on the state network, the data must be prepared as a network object.
+```{r netwob}
+# add the states denoted as matrix sides (i &j) and their proportion of similarity
+netvars <- bl_data[,c("state_i","state_j","proportion")]
+
+# similarity is only measured in one year
+# subset down to the 50x49 unique observations
+unetvars <- unique(netvars)
+
+# Similarity is measured as a percentage in the data. Here, the similarity threshold is set at 90%
+ethresh <- quantile(unetvars$proportion,.9) #.9 dentoes a threshold of 90%
+edges <- as.matrix(unetvars[unetvars$proportion > ethresh ,c(1,2)]) #next, a matrix of the edges is made based on the threshold argument made in the line above
+
+# make a list of nodes
+nodes <- sort(unique(c(as.matrix(unetvars[,c(1,2)])))) #creating a list of the nodes with the sort argument to sort by state name
+
+
+# build the network object
+state_net <- network.initialize(length(nodes)) #the network.initialize command from the network package creates a network based on the length of the nodes list 
+network.vertex.names(state_net) <- nodes #this command sets the name of the vertex to the names of the nodes list 
+state_net[edges] <- 1 # add the edge list made above to the network object
+
+#Store Number of Fatal Death attribute
+set.vertex.attribute(state_net,             # Store in state_net network object
+                      "Division",            # What to name the attribute
+                     census$Division)
+
+#Store Number of Fatal Death attribute
+set.vertex.attribute(x=state_net,             # Store in state_net network object
+                     attrname = "num_fatal",            # What to name the attribute
+                     driver$num_fatal)
+```
+## Visualize the Network
+Division 
+```{r Viz}
+#Division Colors
+div_colors <-ifelse(census$Division=="Pacific", "#CDFAFF", ifelse(census$Division=="West South Central", "#ce1b07", ifelse(census$Division=="East South Central", "#5684B0",
+        ifelse(census$Division=="Mountain", "#e2803a", ifelse(census$Division=="New England", "#CEBB9D",ifelse(census$Division=="South Atlantic", "#C3D1E6",
+        ifelse(census$Division=="West North Central", "#7A0200", ifelse(census$Division=="East North Central", "#CC5500", ifelse(census$Division=="Middle Atlantic", "#008080", "white")))))))))
+
+
+set.seed(09022020)
+xy_cool <- network.layout.fruchtermanreingold(state_net,layout.par = list(cool.exp=1)) #using FR coordinates 
+plot(state_net, # network
+     displaylabels=T, # display the labels
+     coord = xy_cool,  # set the coordinates
+     vertex.cex=3, # set the size of the vertices
+     label.cex=0.5, # set the size of the labels 
+     edge.col=rgb(150,150,150,100,maxColorValue=255),# edge colors
+     label.pos=5, # put the labels in the middle
+     vertex.col= div_colors) #use the node_colors list in the viz
+
+```
+Region
+```{r Viz}
+#Region Colors
+reg_colors <-ifelse(census$Region=="South", "#CDFAFF", ifelse(census$Region=="West", "#ce1b07", ifelse(census$Region=="Midwest", "#5684B0", "white")))
+
+
+set.seed(09022020)
+xy_cool <- network.layout.fruchtermanreingold(state_net,layout.par = list(cool.exp=1)) #using FR coordinates 
+plot(state_net, # network
+     displaylabels=T, # display the labels
+     coord = xy_cool,  # set the coordinates
+     vertex.cex=3, # set the size of the vertices
+     label.cex=0.5, # set the size of the labels 
+     edge.col=rgb(150,150,150,100,maxColorValue=255),# edge colors
+     label.pos=5, # put the labels in the middle
+     vertex.col= reg_colors) #use the node_colors list in the viz
+
+```
+Fatal Driving Accidents 
+```{r Viz}
+#Division Colors
+fatal_colors <-ifelse(driver$num_fatal>=18, "#7A0200", ifelse(driver$num_fatal>=15 , "#ce1b07", ifelse(driver$num_fatal>=10 , "#CEBB9D", "white")))
+
+
+set.seed(09022020)
+xy_cool <- network.layout.fruchtermanreingold(state_net,layout.par = list(cool.exp=1)) #using FR coordinates 
+plot(state_net, # network
+     displaylabels=T, # display the labels
+     coord = xy_cool,  # set the coordinates
+     vertex.cex=3, # set the size of the vertices
+     label.cex=0.5, # set the size of the labels 
+     edge.col=rgb(150,150,150,100,maxColorValue=255),# edge colors
+     label.pos=5, # put the labels in the middle
+     vertex.col= fatal_colors) #use the node_colors list in the viz
+```
+## Assortative Mixing: Non-Weighted Graph
+num_fatal=0.11, low homophily
+fatal_no_provisions= -0.04, low heterophily
+Division=0.41, mild homophily
+Region= 0.74, high homophily
+```{r assortmix}
+#Assortatative Mixing 
+#Continuous Examples 
+assortment.continuous(state_net,driver$num_fatal,weighted=FALSE) #the assortnet continuous command on the num_fatal variable. Note you can call the variable from the vector of a dataset-you do not need to assign it as a network attribute. 
+assortment.continuous(state_net,driver$fatal_no_previous,weighted=FALSE)  #the assortnet continuous command on the fatal_no_previous variable.
+
+#Discrete Examples
+assortment.discrete(state_net,census$Division,weighted=FALSE)  #the assortnet discrete command on the Division variable.
+assortment.discrete(state_net,census$Region,weighted=FALSE)  #the assortnet discrete command on the Region variable.
+
+```
+## Weighted Assortatative Mixing 
+Weighting the graph impacts the assortatative mixing results:
+num_fatal=0.09, low homophily (lower than unweighted ex.)
+fatal_no_provisions= -0.04, low heterophily (same as unweighted ex.)
+Division=0.16, low homophily (lower than unweighted ex.)
+Region= 0.35, mild homophily (lower than unweighted ex.)
+```{r assortweight}
+#Assortatative Mixing 
+#Continuous Examples
+state_netW <- state_net[,] #make a new network object from state_net
+state_netW[as.matrix(unetvars[,c(1,2)])] <- unetvars$proportion #add weights to the network using the proportion variable
+assortment.continuous(state_netW,driver$num_fatal,weighted=T) #the same code from the non-weighted example on num_fatal, except now weighted=T
+assortment.continuous(state_netW,driver$fatal_no_previous,weighted=T) #the same code from the non-weighted example on fatal_no_previous, except now weighted= T
+
+#Discrete Examples
+assortment.discrete(state_netW, census$Division,weighted=T) #the same code from the non-weighted example on Division, exceptt now weighted=T
+assortment.discrete(state_netW, census$Region,weighted=T) #the same code from the non-weighted example on Region, except now weighted=T
+```
+## igraph example
+The igraph package has more assortative mixing commands. However, you will need to make your network object using igraph. Additionally, any commands from the network package should be ran before loading igraph, as the two packages are clunky together. 
+
+There is a discrete and continuous example for the igraph package, just as in the assortnet package. Note that the values are the same as the unweighted network examples in assortnet.
+
+Additonally, igraph allows you to test the assortativity degree. Here, we are testing whether nodes with high perceived state similarity scores frequently connect together. It is essentially a Pearson's correlation measure where we ask if similar nodes are correlated with each other. 
+```{r igraph}
+library(igraph) #load igraph
+#install.packages("intergraph") uncomment and run this line if you do not have the intergraph pacakge installed
+library(intergraph) #load intergraph 
+
+grph <- asIgraph(state_net) #make the igraph network object from state_net
+
+assortativity(grph, types1 = driver$num_fatal, types2 = NULL, directed = TRUE) # assortativity commannd is for continuous variables, such as num_fatal
+assortativity_nominal(grph, types = as.factor(census$Region), directed = TRUE) # assortativity_nominal command is for discrete variable such as Region
+assortativity_degree(grph, directed = TRUE) #This command tests the degree of assortativity on nodes of the graph 
+
+```
+
+## Pacakge Info
+assortnet: https://cran.r-project.org/web/packages/assortnet/assortnet.pdf
+igraph: https://igraph.org/r/html/1.3.2/assortativity.html 
